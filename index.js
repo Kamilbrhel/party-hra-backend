@@ -11,13 +11,11 @@ app.use(express.urlencoded({ extended: true }));
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'aaaaaa';
 
-// Připojení k PostgreSQL databázi na Renderu
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Pomocná funkce pro zápis do logů
 async function logEvent(category, text) {
   try {
     await pool.query(
@@ -29,7 +27,6 @@ async function logEvent(category, text) {
   }
 }
 
-// Inicializace databáze
 async function initDb() {
   try {
     await pool.query(`
@@ -82,19 +79,14 @@ async function initDb() {
 
 initDb();
 
-// Automatické mazání logů starších než 12 hodin (spouští se každou hodinu)
 setInterval(async () => {
   try {
-    const res = await pool.query("DELETE FROM game_logs WHERE created_at < NOW() - INTERVAL '12 hours'");
-    if (res.rowCount > 0) {
-      console.log(`Smazáno ${res.rowCount} starých logů.`);
-    }
+    await pool.query("DELETE FROM game_logs WHERE created_at < NOW() - INTERVAL '12 hours'");
   } catch (err) {
     console.error('Chyba při mazání starých logů:', err);
   }
 }, 60 * 60 * 1000);
 
-// Middleware pro kontrolu administrátorského hesla
 function checkAdminAuth(req, res, next) {
   const authHeader = req.headers['x-admin-password'] || req.query.password || req.body.password;
   if (authHeader === ADMIN_PASSWORD) {
@@ -105,7 +97,7 @@ function checkAdminAuth(req, res, next) {
 }
 
 // ==========================================
-// ADMIN API ENDPOINTY
+// ADMIN API
 // ==========================================
 
 app.get('/api/admin/data', checkAdminAuth, async (req, res) => {
@@ -122,7 +114,6 @@ app.get('/api/admin/data', checkAdminAuth, async (req, res) => {
 app.post('/api/admin/impostor', checkAdminAuth, async (req, res) => {
   const { wordsInput } = req.body;
   if (!wordsInput) return res.status(400).send('Chybí data');
-
   const items = wordsInput.split(';').map(s => s.trim()).filter(s => s.length > 0);
   try {
     for (const word of items) {
@@ -138,7 +129,6 @@ app.post('/api/admin/impostor', checkAdminAuth, async (req, res) => {
 app.post('/api/admin/tod', checkAdminAuth, async (req, res) => {
   const { type, textInput } = req.body;
   if (!type || !textInput) return res.status(400).send('Chybí data');
-
   const items = textInput.split(';').map(s => s.trim()).filter(s => s.length > 0);
   try {
     for (const text of items) {
@@ -155,7 +145,6 @@ app.delete('/api/admin/:table/:id', checkAdminAuth, async (req, res) => {
   const { table, id } = req.params;
   const validTables = ['impostor_words', 'truth_or_dare'];
   if (!validTables.includes(table)) return res.status(400).send('Neplatná tabulka');
-
   try {
     await pool.query(`DELETE FROM ${table} WHERE id = $1`, [id]);
     res.json({ success: true });
@@ -173,7 +162,6 @@ app.post('/api/admin/clear-logs', checkAdminAuth, async (req, res) => {
   }
 });
 
-// HTML Administrátorská Stránka (/admin)
 app.get('/admin', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -193,28 +181,23 @@ app.get('/admin', (req, res) => {
         button { background: #38bdf8; color: #0f172a; font-weight: bold; border: none; cursor: pointer; transition: 0.2s; }
         button:hover { background: #0284c7; color: white; }
         .hint { font-size: 13px; color: #94a3b8; margin-top: -5px; margin-bottom: 10px; }
-        
         #authOverlay { position: fixed; top:0; left:0; width:100%; height:100%; background: #0f172a; display: flex; justify-content: center; align-items: center; z-index: 999; }
         .login-box { background: #1e293b; padding: 30px; border-radius: 12px; width: 90%; max-width: 400px; text-align: center; }
-
         .list-box { max-height: 250px; overflow-y: auto; margin-top: 10px; }
         .list-item { display: flex; justify-content: space-between; align-items: center; background: #0f172a; padding: 10px 14px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #334155; font-size: 14px; word-break: break-word; }
         .btn-del { background: #ef4444; color: white; border: none; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; width: auto; margin-left: 10px; flex-shrink: 0; margin-bottom: 0; }
         .badge { font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px; text-transform: uppercase; }
         .badge-truth { background: #3b82f6; color: white; }
         .badge-dare { background: #a855f7; color: white; }
-        
         .log-tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
         .tab-btn { background: #334155; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-size: 13px; cursor: pointer; width: auto; margin-bottom: 0; }
         .tab-btn.active { background: #38bdf8; color: #0f172a; font-weight: bold; }
-        
         .log-item { padding: 8px 12px; border-bottom: 1px solid #334155; font-size: 13px; display: flex; gap: 10px; }
         .log-time { color: #64748b; font-family: monospace; }
         .log-cat { font-weight: bold; color: #38bdf8; width: 80px; flex-shrink: 0; }
       </style>
     </head>
     <body>
-
       <div id="authOverlay">
         <div class="login-box">
           <h2 style="justify-content: center; color: #38bdf8;">🔒 Administrace</h2>
@@ -293,10 +276,8 @@ app.get('/admin', (req, res) => {
               headers: { 'x-admin-password': adminPassword }
             });
             if (res.status === 401) return false;
-
             const data = await res.json();
             allLogs = data.logs;
-
             renderLogs();
             renderWords(data.words);
             renderTod(data.tod);
@@ -316,12 +297,10 @@ app.get('/admin', (req, res) => {
         function renderLogs() {
           const box = document.getElementById('logsBox');
           const filtered = currentFilter === 'ALL' ? allLogs : allLogs.filter(l => l.category === currentFilter);
-          
           if (filtered.length === 0) {
             box.innerHTML = '<div style="color: #64748b; padding: 10px;">Žádné logy v této kategorii.</div>';
             return;
           }
-
           box.innerHTML = filtered.map(l => \`
             <div class="log-item">
               <span class="log-time">\${l.time_str}</span>
@@ -337,15 +316,12 @@ app.get('/admin', (req, res) => {
             alert('Žádné logy ke stažení!');
             return;
           }
-
           let txtContent = \`=== PÁRTY HRA - HERNÍ LOGY (\${currentFilter}) ===\\n\`;
           txtContent += \`Vygenerováno: \${new Date().toLocaleString('cs-CZ')}\\n\`;
           txtContent += \`==================================================\\n\\n\`;
-
           filtered.forEach(l => {
             txtContent += \`[\${l.time_str}] [\${l.category}] \${l.text}\\n\`;
           });
-
           const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8;' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -442,7 +418,7 @@ app.get('/admin', (req, res) => {
 });
 
 // ==========================================
-// SOCKET.IO LOBBY A LOGIKA HRY
+// SOCKET.IO LOGIKA HRY
 // ==========================================
 
 const server = http.createServer(app);
@@ -453,7 +429,16 @@ io.on('connection', (socket) => {
 
   socket.on('create_room', () => {
     const roomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
-    rooms[roomCode] = { hostId: socket.id, players: [], currentGame: null, currentTurnPlayer: null };
+    rooms[roomCode] = { 
+      hostId: socket.id, 
+      players: [], 
+      currentGame: null, 
+      currentTurnIndex: 0,
+      roundCount: 1,
+      secretWord: '',
+      impostorCount: 1,
+      votes: {}
+    };
     socket.join(roomCode);
     socket.emit('room_created', { roomCode });
     logEvent('GAMES', `Vytvořena nová herní místnost: ${roomCode}`);
@@ -463,7 +448,7 @@ io.on('connection', (socket) => {
     const room = rooms[roomCode];
     if (!room) return socket.emit('error_msg', 'Místnost neexistuje!');
 
-    const player = { id: socket.id, name: playerName, role: '' };
+    const player = { id: socket.id, name: playerName, role: 'Hráč' };
     room.players.push(player);
     socket.join(roomCode);
 
@@ -473,34 +458,132 @@ io.on('connection', (socket) => {
     logEvent('PLAYERS', `Hráč "${playerName}" se připojil do místnosti ${roomCode}`);
   });
 
-  socket.on('start_impostor', async ({ roomCode }) => {
+  // START IMPOSTOR HRY
+  socket.on('start_impostor', async ({ roomCode, impostorCount }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
 
+    room.currentGame = 'impostor';
+    room.impostorCount = Math.min(parseInt(impostorCount) || 1, room.players.length - 1 || 1);
+    room.currentTurnIndex = 0;
+    room.roundCount = 1;
+    room.votes = {};
+
     try {
       const dbRes = await pool.query('SELECT word FROM impostor_words ORDER BY RANDOM() LIMIT 1');
-      const randomWord = dbRes.rows[0]?.word || 'Káva';
-      const impostorIndex = Math.floor(Math.random() * room.players.length);
-      let impostorName = '';
+      room.secretWord = dbRes.rows[0]?.word || 'Káva';
 
+      // Náhodný výběr Impostorů
+      const shuffledIndices = room.players.map((_, i) => i).sort(() => Math.random() - 0.5);
+      const impostorIndices = shuffledIndices.slice(0, room.impostorCount);
+
+      const impostorNames = [];
       room.players.forEach((player, index) => {
-        if (index === impostorIndex) {
+        if (impostorIndices.includes(index)) {
           player.role = 'Impostor';
-          impostorName = player.name;
-          io.to(player.id).emit('assign_role', { game: 'impostor', role: 'Impostor', word: '???' });
+          impostorNames.push(player.name);
         } else {
           player.role = 'Hráč';
-          io.to(player.id).emit('assign_role', { game: 'impostor', role: 'Hráč', word: randomWord });
         }
       });
 
-      io.to(room.hostId).emit('game_started', { game: 'Impostor' });
-      logEvent('IMPOSTOR', `Spuštěna hra v ${roomCode}. Tajné slovo: "${randomWord}", Impostor: ${impostorName}`);
+      // Zákaz startování Impostora (90% šance, že začne běžný hráč)
+      const allowImpostorToStart = Math.random() < 0.1; 
+      let startIndex = 0;
+
+      if (!allowImpostorToStart) {
+        const regularPlayerIndices = room.players
+          .map((p, idx) => p.role === 'Hráč' ? idx : -1)
+          .filter(idx => idx !== -1);
+        if (regularPlayerIndices.length > 0) {
+          startIndex = regularPlayerIndices[Math.floor(Math.random() * regularPlayerIndices.length)];
+        }
+      } else {
+        startIndex = Math.floor(Math.random() * room.players.length);
+      }
+
+      room.currentTurnIndex = startIndex;
+
+      // Odeslání rolí všem hráčům
+      room.players.forEach((player) => {
+        io.to(player.id).emit('assign_role', { 
+          game: 'impostor', 
+          role: player.role, 
+          word: player.role === 'Impostor' ? '???' : room.secretWord 
+        });
+      });
+
+      // Zaznamenání turn stavu
+      sendImpostorTurnState(roomCode);
+
+      logEvent('IMPOSTOR', `Spuštěna hra v ${roomCode}. Tajné slovo: "${room.secretWord}", Impostoři: ${impostorNames.join(', ')}. Začíná: ${room.players[startIndex].name}`);
     } catch (err) {
       console.error('Chyba DB:', err);
     }
   });
 
+  // Hráč odehrál svůj tah v Impostorovi
+  socket.on('next_impostor_turn', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room || room.players.length === 0) return;
+
+    room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+    
+    // Pokud jsme prošli celé kolečko
+    if (room.currentTurnIndex === 0) {
+      room.roundCount++;
+    }
+
+    sendImpostorTurnState(roomCode);
+  });
+
+  // Zahájení hlasování v Impostorovi
+  socket.on('start_voting', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    room.votes = {};
+    const playerList = room.players.map(p => ({ id: p.id, name: p.name }));
+    io.to(roomCode).emit('impostor_voting_started', { players: playerList });
+    logEvent('IMPOSTOR', `Spuštěno hlasování v místnosti ${roomCode}`);
+  });
+
+  // Hráč poslal hlas
+  socket.on('submit_vote', ({ roomCode, votedPlayerId }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    room.votes[socket.id] = votedPlayerId;
+
+    // Sčítání hlasů pro notebook
+    const voteCounts = {};
+    Object.values(room.votes).forEach(targetId => {
+      voteCounts[targetId] = (voteCounts[targetId] || 0) + 1;
+    });
+
+    io.to(room.hostId).emit('update_vote_counts', {
+      totalVotes: Object.keys(room.votes).length,
+      totalPlayers: room.players.length,
+      voteCounts: voteCounts
+    });
+  });
+
+  // Odhalení výsledků na notebooku
+  socket.on('reveal_impostor', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    const impostors = room.players.filter(p => p.role === 'Impostor').map(p => p.name);
+    
+    io.to(roomCode).emit('impostor_revealed', {
+      impostors: impostors,
+      secretWord: room.secretWord
+    });
+
+    logEvent('IMPOSTOR', `Konec hry v ${roomCode}. Odhaleni Impostoři: ${impostors.join(', ')}`);
+  });
+
+  // PRAVDA NEBO ÚKOL
   socket.on('start_truth_or_dare', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
@@ -558,6 +641,21 @@ io.on('connection', (socket) => {
     }
   });
 });
+
+function sendImpostorTurnState(roomCode) {
+  const room = rooms[roomCode];
+  if (!room || room.players.length === 0) return;
+
+  const activePlayer = room.players[room.currentTurnIndex];
+  const nextPlayer = room.players[(room.currentTurnIndex + 1) % room.players.length];
+
+  io.to(roomCode).emit('impostor_turn_update', {
+    activePlayerId: activePlayer.id,
+    activePlayerName: activePlayer.name,
+    nextPlayerName: nextPlayer.name,
+    roundCount: room.roundCount
+  });
+}
 
 function nextTruthOrDareTurn(roomCode) {
   const room = rooms[roomCode];
