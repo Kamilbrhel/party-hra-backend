@@ -11,11 +11,13 @@ app.use(express.urlencoded({ extended: true }));
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'aaaaaa';
 
+// Připojení k PostgreSQL databázi na Renderu
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
+// Pomocná funkce pro zápis do logů
 async function logEvent(category, text) {
   try {
     await pool.query(
@@ -27,6 +29,7 @@ async function logEvent(category, text) {
   }
 }
 
+// Inicializace databáze
 async function initDb() {
   try {
     await pool.query(`
@@ -79,14 +82,19 @@ async function initDb() {
 
 initDb();
 
+// Automatické mazání logů starších než 12 hodin (každou hodinu)
 setInterval(async () => {
   try {
-    await pool.query("DELETE FROM game_logs WHERE created_at < NOW() - INTERVAL '12 hours'");
+    const res = await pool.query("DELETE FROM game_logs WHERE created_at < NOW() - INTERVAL '12 hours'");
+    if (res.rowCount > 0) {
+      console.log(`Smazáno ${res.rowCount} starých logů.`);
+    }
   } catch (err) {
     console.error('Chyba při mazání starých logů:', err);
   }
 }, 60 * 60 * 1000);
 
+// Middleware pro kontrolu administrátorského hesla
 function checkAdminAuth(req, res, next) {
   const authHeader = req.headers['x-admin-password'] || req.query.password || req.body.password;
   if (authHeader === ADMIN_PASSWORD) {
@@ -97,7 +105,7 @@ function checkAdminAuth(req, res, next) {
 }
 
 // ==========================================
-// ADMIN API
+// ADMIN API ENDPOINTY
 // ==========================================
 
 app.get('/api/admin/data', checkAdminAuth, async (req, res) => {
@@ -114,6 +122,7 @@ app.get('/api/admin/data', checkAdminAuth, async (req, res) => {
 app.post('/api/admin/impostor', checkAdminAuth, async (req, res) => {
   const { wordsInput } = req.body;
   if (!wordsInput) return res.status(400).send('Chybí data');
+
   const items = wordsInput.split(';').map(s => s.trim()).filter(s => s.length > 0);
   try {
     for (const word of items) {
@@ -129,6 +138,7 @@ app.post('/api/admin/impostor', checkAdminAuth, async (req, res) => {
 app.post('/api/admin/tod', checkAdminAuth, async (req, res) => {
   const { type, textInput } = req.body;
   if (!type || !textInput) return res.status(400).send('Chybí data');
+
   const items = textInput.split(';').map(s => s.trim()).filter(s => s.length > 0);
   try {
     for (const text of items) {
@@ -145,6 +155,7 @@ app.delete('/api/admin/:table/:id', checkAdminAuth, async (req, res) => {
   const { table, id } = req.params;
   const validTables = ['impostor_words', 'truth_or_dare'];
   if (!validTables.includes(table)) return res.status(400).send('Neplatná tabulka');
+
   try {
     await pool.query(`DELETE FROM ${table} WHERE id = $1`, [id]);
     res.json({ success: true });
@@ -162,6 +173,7 @@ app.post('/api/admin/clear-logs', checkAdminAuth, async (req, res) => {
   }
 });
 
+// HTML Administrátorská Stránka (/admin)
 app.get('/admin', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -198,6 +210,7 @@ app.get('/admin', (req, res) => {
       </style>
     </head>
     <body>
+
       <div id="authOverlay">
         <div class="login-box">
           <h2 style="justify-content: center; color: #38bdf8;">🔒 Administrace</h2>
@@ -276,8 +289,10 @@ app.get('/admin', (req, res) => {
               headers: { 'x-admin-password': adminPassword }
             });
             if (res.status === 401) return false;
+
             const data = await res.json();
             allLogs = data.logs;
+
             renderLogs();
             renderWords(data.words);
             renderTod(data.tod);
@@ -297,10 +312,12 @@ app.get('/admin', (req, res) => {
         function renderLogs() {
           const box = document.getElementById('logsBox');
           const filtered = currentFilter === 'ALL' ? allLogs : allLogs.filter(l => l.category === currentFilter);
+          
           if (filtered.length === 0) {
             box.innerHTML = '<div style="color: #64748b; padding: 10px;">Žádné logy v této kategorii.</div>';
             return;
           }
+
           box.innerHTML = filtered.map(l => \`
             <div class="log-item">
               <span class="log-time">\${l.time_str}</span>
@@ -316,12 +333,15 @@ app.get('/admin', (req, res) => {
             alert('Žádné logy ke stažení!');
             return;
           }
+
           let txtContent = \`=== PÁRTY HRA - HERNÍ LOGY (\${currentFilter}) ===\\n\`;
           txtContent += \`Vygenerováno: \${new Date().toLocaleString('cs-CZ')}\\n\`;
           txtContent += \`==================================================\\n\\n\`;
+
           filtered.forEach(l => {
             txtContent += \`[\${l.time_str}] [\${l.category}] \${l.text}\\n\`;
           });
+
           const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8;' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -418,7 +438,7 @@ app.get('/admin', (req, res) => {
 });
 
 // ==========================================
-// SOCKET.IO LOGIKA HRY
+// SOCKET.IO LOBBY A LOGIKA HRY
 // ==========================================
 
 const server = http.createServer(app);
@@ -444,21 +464,48 @@ io.on('connection', (socket) => {
     logEvent('GAMES', `Vytvořena nová herní místnost: ${roomCode}`);
   });
 
+  // Hráč se připojí nebo obnoví stránku
   socket.on('join_room', ({ roomCode, playerName }) => {
     const room = rooms[roomCode];
     if (!room) return socket.emit('error_msg', 'Místnost neexistuje!');
 
-    const player = { id: socket.id, name: playerName, role: 'Hráč' };
-    room.players.push(player);
-    socket.join(roomCode);
+    const trimmedName = playerName.trim();
+    const existingPlayer = room.players.find(p => p.name.toLowerCase() === trimmedName.toLowerCase());
 
-    socket.emit('joined_successfully', { playerName, roomCode });
-    io.to(room.hostId).emit('update_players', room.players);
+    if (existingPlayer) {
+      // HRÁČ UŽ V MÍSTNOSTI JE (REFRESH) -> Pouze aktualizujeme jeho Socket ID
+      existingPlayer.id = socket.id;
+      socket.join(roomCode);
 
-    logEvent('PLAYERS', `Hráč "${playerName}" se připojil do místnosti ${roomCode}`);
+      socket.emit('joined_successfully', { playerName: existingPlayer.name, roomCode });
+      logEvent('PLAYERS', `Hráč "${existingPlayer.name}" obnovil stránku (reconnect) v ${roomCode}`);
+
+      // Pokud běží hra, pošleme mu znova jeho roli
+      if (room.currentGame === 'impostor') {
+        socket.emit('assign_role', { 
+          game: 'impostor', 
+          role: existingPlayer.role, 
+          word: existingPlayer.role === 'Impostor' ? '???' : room.secretWord 
+        });
+        sendImpostorTurnState(roomCode);
+      } else if (room.currentGame === 'truth_or_dare') {
+        if (room.currentTurnPlayer) {
+          socket.emit('tod_player_turn', { playerId: room.currentTurnPlayer.id, playerName: room.currentTurnPlayer.name });
+        }
+      }
+    } else {
+      // NOVÝ HRÁČ -> Přidáme ho do seznamu
+      const newPlayer = { id: socket.id, name: trimmedName, role: 'Hráč' };
+      room.players.push(newPlayer);
+      socket.join(roomCode);
+
+      socket.emit('joined_successfully', { playerName: trimmedName, roomCode });
+      io.to(room.hostId).emit('update_players', room.players);
+
+      logEvent('PLAYERS', `Hráč "${trimmedName}" se připojil do místnosti ${roomCode}`);
+    }
   });
 
-  // START IMPOSTOR HRY
   socket.on('start_impostor', async ({ roomCode, impostorCount }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
@@ -473,7 +520,6 @@ io.on('connection', (socket) => {
       const dbRes = await pool.query('SELECT word FROM impostor_words ORDER BY RANDOM() LIMIT 1');
       room.secretWord = dbRes.rows[0]?.word || 'Káva';
 
-      // Náhodný výběr Impostorů
       const shuffledIndices = room.players.map((_, i) => i).sort(() => Math.random() - 0.5);
       const impostorIndices = shuffledIndices.slice(0, room.impostorCount);
 
@@ -487,7 +533,7 @@ io.on('connection', (socket) => {
         }
       });
 
-      // Zákaz startování Impostora (90% šance, že začne běžný hráč)
+      // 10% šance, že začne Impostor
       const allowImpostorToStart = Math.random() < 0.1; 
       let startIndex = 0;
 
@@ -504,7 +550,6 @@ io.on('connection', (socket) => {
 
       room.currentTurnIndex = startIndex;
 
-      // Odeslání rolí všem hráčům
       room.players.forEach((player) => {
         io.to(player.id).emit('assign_role', { 
           game: 'impostor', 
@@ -513,31 +558,24 @@ io.on('connection', (socket) => {
         });
       });
 
-      // Zaznamenání turn stavu
       sendImpostorTurnState(roomCode);
-
       logEvent('IMPOSTOR', `Spuštěna hra v ${roomCode}. Tajné slovo: "${room.secretWord}", Impostoři: ${impostorNames.join(', ')}. Začíná: ${room.players[startIndex].name}`);
     } catch (err) {
       console.error('Chyba DB:', err);
     }
   });
 
-  // Hráč odehrál svůj tah v Impostorovi
   socket.on('next_impostor_turn', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
 
     room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
-    
-    // Pokud jsme prošli celé kolečko
     if (room.currentTurnIndex === 0) {
       room.roundCount++;
     }
-
     sendImpostorTurnState(roomCode);
   });
 
-  // Zahájení hlasování v Impostorovi
   socket.on('start_voting', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -548,14 +586,12 @@ io.on('connection', (socket) => {
     logEvent('IMPOSTOR', `Spuštěno hlasování v místnosti ${roomCode}`);
   });
 
-  // Hráč poslal hlas
   socket.on('submit_vote', ({ roomCode, votedPlayerId }) => {
     const room = rooms[roomCode];
     if (!room) return;
 
     room.votes[socket.id] = votedPlayerId;
 
-    // Sčítání hlasů pro notebook
     const voteCounts = {};
     Object.values(room.votes).forEach(targetId => {
       voteCounts[targetId] = (voteCounts[targetId] || 0) + 1;
@@ -568,22 +604,18 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Odhalení výsledků na notebooku
   socket.on('reveal_impostor', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
 
     const impostors = room.players.filter(p => p.role === 'Impostor').map(p => p.name);
-    
     io.to(roomCode).emit('impostor_revealed', {
       impostors: impostors,
       secretWord: room.secretWord
     });
-
     logEvent('IMPOSTOR', `Konec hry v ${roomCode}. Odhaleni Impostoři: ${impostors.join(', ')}`);
   });
 
-  // PRAVDA NEBO ÚKOL
   socket.on('start_truth_or_dare', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
@@ -623,19 +655,28 @@ io.on('connection', (socket) => {
   socket.on('return_to_lobby', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
+    room.currentGame = null;
     io.to(roomCode).emit('back_to_lobby');
     logEvent('GAMES', `Návrat do lobby v místnosti ${roomCode}`);
   });
 
+  // Odpojení s časovou prodlevou (pro případ, že šlo jen o refresh stránky)
   socket.on('disconnect', () => {
     for (const code in rooms) {
       const room = rooms[code];
-      const idx = room.players.findIndex(p => p.id === socket.id);
-      if (idx !== -1) {
-        const disconnectedPlayer = room.players[idx];
-        room.players.splice(idx, 1);
-        io.to(room.hostId).emit('update_players', room.players);
-        logEvent('PLAYERS', `Hráč "${disconnectedPlayer.name}" se odpojil z ${code}`);
+      const playerIndex = room.players.findIndex(p => p.id === socket.id);
+      
+      if (playerIndex !== -1) {
+        const disconnectedPlayer = room.players[playerIndex];
+
+        // Počkáme 4 sekundy, zda se hráč nevrátí (refresh)
+        setTimeout(() => {
+          if (disconnectedPlayer.id === socket.id) {
+            room.players.splice(playerIndex, 1);
+            io.to(room.hostId).emit('update_players', room.players);
+            logEvent('PLAYERS', `Hráč "${disconnectedPlayer.name}" se odpojil z ${code}`);
+          }
+        }, 4000);
         break;
       }
     }
