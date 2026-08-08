@@ -55,7 +55,6 @@ async function initDb() {
       );
     `);
 
-    // Výchozí data pokud jsou tabulky prázdné
     const wordsCount = await pool.query('SELECT COUNT(*) FROM impostor_words');
     if (parseInt(wordsCount.rows[0].count) === 0) {
       await pool.query("INSERT INTO impostor_words (word) VALUES ('Káva'), ('Letiště'), ('Nemocnice'), ('Škola'), ('Fotbal');");
@@ -195,51 +194,240 @@ app.post('/api/admin/clear-logs', checkAdminAuth, async (req, res) => {
   }
 });
 
-// Admin HTML zůstává přístupný na /admin
+// HTML ADMINISTRACE (/admin)
 app.get('/admin', (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html lang="cs">
     <head>
       <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>Párty Hra - Administrace</title>
       <style>
-        body { font-family: sans-serif; background: #0f172a; color: white; padding: 20px; }
-        .card { background: #1e293b; padding: 20px; border-radius: 12px; margin-bottom: 20px; }
-        textarea, select, button { width: 100%; padding: 10px; margin-top: 5px; border-radius: 8px; background: #0f172a; color: white; border: 1px solid #334155; }
-        button { background: #38bdf8; color: #0f172a; font-weight: bold; cursor: pointer; }
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 15px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { color: #38bdf8; text-align: center; font-size: 24px; margin-bottom: 20px; }
+        .card { background: #1e293b; padding: 20px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        h2 { color: #4ade80; font-size: 18px; margin-top: 0; border-bottom: 1px solid #334155; padding-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+        input, select, textarea, button { font-size: 16px; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; width: 100%; margin-bottom: 10px; }
+        button { background: #38bdf8; color: #0f172a; font-weight: bold; border: none; cursor: pointer; transition: 0.2s; }
+        button:hover { background: #0284c7; color: white; }
+        .hint { font-size: 13px; color: #94a3b8; margin-top: -5px; margin-bottom: 10px; }
+        #authOverlay { position: fixed; top:0; left:0; width:100%; height:100%; background: #0f172a; display: flex; justify-content: center; align-items: center; z-index: 999; }
+        .login-box { background: #1e293b; padding: 30px; border-radius: 12px; width: 90%; max-width: 400px; text-align: center; }
+        .list-box { max-height: 200px; overflow-y: auto; margin-top: 10px; }
+        .list-item { display: flex; justify-content: space-between; align-items: center; background: #0f172a; padding: 8px 12px; border-radius: 8px; margin-bottom: 6px; border: 1px solid #334155; font-size: 14px; word-break: break-word; }
+        .btn-del { background: #ef4444; color: white; border: none; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; width: auto; margin-left: 10px; flex-shrink: 0; margin-bottom: 0; }
+        .badge { font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px; text-transform: uppercase; }
+        .badge-truth { background: #3b82f6; color: white; }
+        .badge-dare { background: #a855f7; color: white; }
+        .log-item { padding: 8px 12px; border-bottom: 1px solid #334155; font-size: 13px; display: flex; gap: 10px; }
+        .log-time { color: #64748b; font-family: monospace; }
+        .log-cat { font-weight: bold; color: #38bdf8; width: 80px; flex-shrink: 0; }
       </style>
     </head>
     <body>
-      <h1>⚙️ Administrace Hry</h1>
-      <div class="card">
-        <h3>Přidat data (oddělujte středníkem ;)</h3>
-        <select id="targetTable">
-          <option value="impostor_words">Impostor - Slova</option>
-          <option value="truth_or_dare">Pravda nebo Úkol</option>
-          <option value="who_would">Kdo by spíš...</option>
-          <option value="never_have_i">Nikdy jsem...</option>
-        </select>
-        <select id="todType" style="margin-top:10px;">
-          <option value="truth">Pravda</option>
-          <option value="dare">Úkol</option>
-        </select>
-        <textarea id="bulkInput" rows="3" placeholder="Položka 1; Položka 2; Položka 3"></textarea>
-        <button onclick="sendBulk()">➕ Přidat do Databáze</button>
+
+      <div id="authOverlay">
+        <div class="login-box">
+          <h2 style="justify-content: center; color: #38bdf8;">🔒 Administrace</h2>
+          <p style="color: #94a3b8; font-size: 14px;">Zadejte heslo pro přístup</p>
+          <input type="password" id="passInput" value="aaaaaa" placeholder="Heslo admina" onkeydown="if(event.key==='Enter') login()">
+          <button onclick="login()">Vstoupit</button>
+          <div id="loginError" style="color: #ef4444; margin-top: 10px; font-size: 14px; display: none;">Neplatné heslo!</div>
+        </div>
       </div>
+
+      <div class="container" id="mainContent" style="display: none;">
+        <h1>⚙️ Správa Databáze & Logy</h1>
+
+        <!-- VKLÁDÁNÍ NOVÝCH DAT -->
+        <div class="card">
+          <h2>➕ Hromadné Přidávání Otázek / Slov</h2>
+          <label>Vyber Hru / Databázi:</label>
+          <select id="targetTable" onchange="toggleTodSelect()">
+            <option value="impostor_words">🕵️ Impostor - Slova</option>
+            <option value="truth_or_dare">🎲 Pravda nebo Úkol</option>
+            <option value="who_would">🤔 Kdo by spíš...</option>
+            <option value="never_have_i">🍺 Nikdy jsem...</option>
+          </select>
+
+          <div id="todTypeBox" style="display: none;">
+            <label>Typ:</label>
+            <select id="todType">
+              <option value="truth">Pravda</option>
+              <option value="dare">Úkol</option>
+            </select>
+          </div>
+
+          <textarea id="bulkInput" rows="3" placeholder="Položka 1; Položka 2; Položka 3"></textarea>
+          <div class="hint">Více položek najednou oddělujte středníkem (<b>;</b>).</div>
+          <button onclick="sendBulk()">➕ Uložit do Databáze</button>
+        </div>
+
+        <!-- SEZNAMY V DATABÁZI -->
+        <div class="card">
+          <h2>🕵️ Impostor - Slova</h2>
+          <div id="impostorList" class="list-box"><i>Načítám...</i></div>
+        </div>
+
+        <div class="card">
+          <h2>🎲 Pravda nebo Úkol</h2>
+          <div id="todList" class="list-box"><i>Načítám...</i></div>
+        </div>
+
+        <div class="card">
+          <h2>🤔 Kdo by spíš...</h2>
+          <div id="whoList" class="list-box"><i>Načítám...</i></div>
+        </div>
+
+        <div class="card">
+          <h2>🍺 Nikdy jsem...</h2>
+          <div id="neverList" class="list-box"><i>Načítám...</i></div>
+        </div>
+
+        <!-- LOGY -->
+        <div class="card">
+          <h2>
+            📜 Logy Hry
+            <div>
+              <button onclick="downloadLogsTxt()" style="background: #059669; width: auto; font-size: 12px; padding: 6px 12px; margin-bottom:0;">📥 Stáhnout TXT</button>
+            </div>
+          </h2>
+          <div id="logsBox" class="list-box" style="max-height: 250px; background: #0f172a; border-radius: 8px; padding: 8px;">
+            <i>Načítám logy...</i>
+          </div>
+        </div>
+      </div>
+
       <script>
+        let adminPassword = 'aaaaaa';
+        let allLogs = [];
+
+        function toggleTodSelect() {
+          const table = document.getElementById('targetTable').value;
+          document.getElementById('todTypeBox').style.display = table === 'truth_or_dare' ? 'block' : 'none';
+        }
+
+        async function login() {
+          const p = document.getElementById('passInput').value;
+          adminPassword = p || 'aaaaaa';
+          const success = await loadData();
+          if (success) {
+            document.getElementById('authOverlay').style.display = 'none';
+            document.getElementById('mainContent').style.display = 'block';
+          } else {
+            document.getElementById('loginError').style.display = 'block';
+          }
+        }
+
+        async function loadData() {
+          try {
+            const res = await fetch('/api/admin/data', {
+              headers: { 'x-admin-password': adminPassword }
+            });
+            if (res.status === 401) return false;
+
+            const data = await res.json();
+            allLogs = data.logs;
+
+            renderList('impostorList', data.words, 'impostor_words', w => w.word);
+            renderTodList('todList', data.tod);
+            renderList('whoList', data.who, 'who_would', w => w.text);
+            renderList('neverList', data.never, 'never_have_i', n => n.text);
+            renderLogs();
+            return true;
+          } catch (e) {
+            return false;
+          }
+        }
+
+        function renderList(elementId, items, table, textExtractor) {
+          const box = document.getElementById(elementId);
+          if (!items || items.length === 0) {
+            box.innerHTML = '<p style="color: #64748b;">Žádná data v databázi.</p>';
+            return;
+          }
+          box.innerHTML = items.map(item => \`
+            <div class="list-item">
+              <span>\${textExtractor(item)}</span>
+              <button class="btn-del" onclick="deleteItem('\${table}', \${item.id})">Smazat</button>
+            </div>
+          \`).join('');
+        }
+
+        function renderTodList(elementId, items) {
+          const box = document.getElementById(elementId);
+          if (!items || items.length === 0) {
+            box.innerHTML = '<p style="color: #64748b;">Žádná data v databázi.</p>';
+            return;
+          }
+          box.innerHTML = items.map(t => \`
+            <div class="list-item">
+              <div>
+                <span class="badge \${t.type === 'truth' ? 'badge-truth' : 'badge-dare'}">\${t.type}</span>
+                <span>\${t.text}</span>
+              </div>
+              <button class="btn-del" onclick="deleteItem('truth_or_dare', \${t.id})">Smazat</button>
+            </div>
+          \`).join('');
+        }
+
+        function renderLogs() {
+          const box = document.getElementById('logsBox');
+          if (allLogs.length === 0) {
+            box.innerHTML = '<div style="color: #64748b; padding: 10px;">Žádné logy.</div>';
+            return;
+          }
+          box.innerHTML = allLogs.map(l => \`
+            <div class="log-item">
+              <span class="log-time">\${l.time_str}</span>
+              <span class="log-cat">\${l.category}</span>
+              <span>\${l.text}</span>
+            </div>
+          \`).join('');
+        }
+
         async function sendBulk() {
           const table = document.getElementById('targetTable').value;
           const textInput = document.getElementById('bulkInput').value;
           const type = document.getElementById('todType').value;
+
+          if (!textInput) return alert('Zadej text!');
+
           await fetch('/api/admin/bulk-add', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-admin-password': 'aaaaaa' },
+            headers: { 'Content-Type': 'application/json', 'x-admin-password': adminPassword },
             body: JSON.stringify({ table, textInput, type })
           });
+
           document.getElementById('bulkInput').value = '';
-          alert('Přidáno!');
+          loadData();
         }
+
+        async function deleteItem(table, id) {
+          if (confirm('Opravdu smazat tuto položku?')) {
+            await fetch(\`/api/admin/\${table}/\${id}\`, {
+              method: 'DELETE',
+              headers: { 'x-admin-password': adminPassword }
+            });
+            loadData();
+          }
+        }
+
+        function downloadLogsTxt() {
+          if (allLogs.length === 0) return alert('Žádné logy!');
+          let txt = "=== PÁRTY HRA - LOGY ===\\n\\n";
+          allLogs.forEach(l => { txt += \`[\${l.time_str}] [\${l.category}] \${l.text}\\n\`; });
+          const blob = new Blob([txt], { type: 'text/plain;charset=utf-8;' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'herni_logy.txt';
+          a.click();
+        }
+
+        login();
       </script>
     </body>
     </html>
@@ -302,7 +490,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- KDO BY SPÍŠ ---
+  // KDO BY SPÍŠ
   socket.on('start_who_would', async ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -320,7 +508,6 @@ io.on('connection', (socket) => {
 
     room.whoVotes[socket.id] = votedPlayerName;
 
-    // Sčítání hlasů
     const voteCounts = {};
     Object.values(room.whoVotes).forEach(name => {
       voteCounts[name] = (voteCounts[name] || 0) + 1;
@@ -333,7 +520,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // --- NIKDY JSEM (Pouze pro notebook) ---
+  // NIKDY JSEM
   socket.on('get_never_have_i', async ({ roomCode }) => {
     try {
       const dbRes = await pool.query('SELECT text FROM never_have_i ORDER BY RANDOM() LIMIT 1');
@@ -344,7 +531,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- IMPOSTOR & PRAVDA/ÚKOL (ZŮSTÁVÁ STEJNÉ) ---
+  // IMPOSTOR & PRAVDA/ÚKOL
   socket.on('start_impostor', async ({ roomCode, impostorCount }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
