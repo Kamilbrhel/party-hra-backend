@@ -9,16 +9,13 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Heslo pro administraci a skrytý panel nastavené natvrdo
 const ADMIN_PASSWORD = 'aaaaaa';
 
-// Připojení k PostgreSQL databázi na Renderu
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Pomocná funkce pro zápis do logů
 async function logEvent(category, text) {
   try {
     await pool.query(
@@ -30,7 +27,6 @@ async function logEvent(category, text) {
   }
 }
 
-// Inicializace databáze
 async function initDb() {
   try {
     await pool.query(`
@@ -83,19 +79,14 @@ async function initDb() {
 
 initDb();
 
-// Automatické mazání logů starších než 12 hodin
 setInterval(async () => {
   try {
-    const res = await pool.query("DELETE FROM game_logs WHERE created_at < NOW() - INTERVAL '12 hours'");
-    if (res.rowCount > 0) {
-      console.log(`Smazáno ${res.rowCount} starých logů.`);
-    }
+    await pool.query("DELETE FROM game_logs WHERE created_at < NOW() - INTERVAL '12 hours'");
   } catch (err) {
     console.error('Chyba při mazání starých logů:', err);
   }
 }, 60 * 60 * 1000);
 
-// Middleware pro kontrolu hesla
 function checkAdminAuth(req, res, next) {
   const authHeader = req.headers['x-admin-password'] || req.query.password || req.body.password;
   if (authHeader === ADMIN_PASSWORD) {
@@ -109,13 +100,12 @@ function checkAdminAuth(req, res, next) {
 // TAJNÝ REŽISÉRSKÝ PANEL API (/hidden)
 // ==========================================
 
-let riggedQuestions = {}; // Ukládá podvržené otázky pro místnosti
+let riggedQuestions = {}; 
 
 app.get('/api/hidden/info', checkAdminAuth, (req, res) => {
   const roomsInfo = {};
   for (const code in rooms) {
     const room = rooms[code];
-    // Zobrazujeme POUZE místnosti, ve kterých jsou nějací hráči
     if (room.players && room.players.length > 0) {
       const activePlayer = (room.currentGame === 'truth_or_dare' && room.todPlayerOrder && room.todPlayerOrder.length > 0) 
         ? room.todPlayerOrder[room.currentTurnIndex]?.name 
@@ -132,15 +122,16 @@ app.get('/api/hidden/info', checkAdminAuth, (req, res) => {
 });
 
 app.post('/api/hidden/rig', checkAdminAuth, (req, res) => {
-  const { roomCode, customText, type } = req.body;
-  if (!roomCode || !customText) return res.status(400).send('Chybí data');
+  const { roomCode, victimPlayer, customText, type } = req.body;
+  if (!roomCode || !customText || !victimPlayer) return res.status(400).send('Chybí data');
 
   riggedQuestions[roomCode] = {
+    victim: victimPlayer,
     type: type || 'dare',
     text: customText
   };
 
-  logEvent('TOD', `🕵️ SKRYTÝ PODVRH: Pro místnost ${roomCode} připraven úkol/otázka: "${customText}"`);
+  logEvent('TOD', `🕵️ SKRYTÝ PODVRH: Pro hráče "${victimPlayer}" v ${roomCode} připraven úkol/otázka: "${customText}"`);
   res.json({ success: true });
 });
 
@@ -213,7 +204,6 @@ app.post('/api/admin/clear-logs', checkAdminAuth, async (req, res) => {
   }
 });
 
-// HTML Administrátorská Stránka (/admin)
 app.get('/admin', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -478,7 +468,7 @@ app.get('/admin', (req, res) => {
 });
 
 // ==========================================
-// SOCKET.IO LOBBY A LOGIKA HRY
+// SOCKET.IO LOGIKA HRY
 // ==========================================
 
 const server = http.createServer(app);
@@ -541,7 +531,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // LOGIKA IMPOSTOR
   socket.on('start_impostor', async ({ roomCode, impostorCount }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
@@ -651,7 +640,6 @@ io.on('connection', (socket) => {
     logEvent('IMPOSTOR', `Konec hry v ${roomCode}. Odhaleni Impostoři: ${impostors.join(', ')}`);
   });
 
-  // LOGIKA PRAVDA NEBO ÚKOL (I S KONTROLOU PODVRŽENÝCH ÚKOLŮ)
   socket.on('start_truth_or_dare', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
@@ -674,10 +662,14 @@ io.on('connection', (socket) => {
     let question = '';
     let choiceLabel = choice === 'truth' ? 'PRAVDA' : 'ÚKOL';
 
-    // 🕵️ KONTROLA PODVRŽENÉHO ÚKOLU / OTÁZKY
-    if (riggedQuestions[roomCode] && riggedQuestions[roomCode].type === choice) {
+    // 🕵️ KONTROLA PODVRŽENÉHO ÚKOLU PRO KONKRÉTNÍHO HRÁČE
+    if (
+      riggedQuestions[roomCode] && 
+      riggedQuestions[roomCode].victim === activePlayer.name &&
+      riggedQuestions[roomCode].type === choice
+    ) {
       question = riggedQuestions[roomCode].text;
-      delete riggedQuestions[roomCode]; // Po použití se podvrh vymaže
+      delete riggedQuestions[roomCode]; // Po použití se smaže
       console.log(`😈 PODVRŽENÝ ${choiceLabel} POUŽIT PRO HRÁČE ${activePlayer.name}!`);
     } else {
       try {
@@ -732,7 +724,6 @@ io.on('connection', (socket) => {
               room.todPlayerOrder = room.todPlayerOrder.filter(p => p.name !== disconnectedPlayer.name);
             }
 
-            // Pokud v místnosti nikdo nezůstal, celou ji smažeme
             if (room.players.length === 0) {
               delete rooms[code];
               delete riggedQuestions[code];
