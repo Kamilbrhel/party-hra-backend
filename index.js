@@ -82,7 +82,7 @@ async function initDb() {
 
 initDb();
 
-// Automatické mazání logů starších než 12 hodin (každou hodinu)
+// Automatické mazání logů starších než 12 hodin
 setInterval(async () => {
   try {
     const res = await pool.query("DELETE FROM game_logs WHERE created_at < NOW() - INTERVAL '12 hours'");
@@ -457,14 +457,14 @@ io.on('connection', (socket) => {
       roundCount: 1,
       secretWord: '',
       impostorCount: 1,
-      votes: {}
+      votes: {},
+      todPlayerOrder: [] // Pořadí hráčů pro Pravda nebo Úkol
     };
     socket.join(roomCode);
     socket.emit('room_created', { roomCode });
     logEvent('GAMES', `Vytvořena nová herní místnost: ${roomCode}`);
   });
 
-  // Hráč se připojí nebo obnoví stránku
   socket.on('join_room', ({ roomCode, playerName }) => {
     const room = rooms[roomCode];
     if (!room) return socket.emit('error_msg', 'Místnost neexistuje!');
@@ -473,14 +473,12 @@ io.on('connection', (socket) => {
     const existingPlayer = room.players.find(p => p.name.toLowerCase() === trimmedName.toLowerCase());
 
     if (existingPlayer) {
-      // HRÁČ UŽ V MÍSTNOSTI JE (REFRESH) -> Pouze aktualizujeme jeho Socket ID
       existingPlayer.id = socket.id;
       socket.join(roomCode);
 
       socket.emit('joined_successfully', { playerName: existingPlayer.name, roomCode });
-      logEvent('PLAYERS', `Hráč "${existingPlayer.name}" obnovil stránku (reconnect) v ${roomCode}`);
+      logEvent('PLAYERS', `Hráč "${existingPlayer.name}" obnovil stránku v ${roomCode}`);
 
-      // Pokud běží hra, pošleme mu znova jeho roli
       if (room.currentGame === 'impostor') {
         socket.emit('assign_role', { 
           game: 'impostor', 
@@ -489,12 +487,9 @@ io.on('connection', (socket) => {
         });
         sendImpostorTurnState(roomCode);
       } else if (room.currentGame === 'truth_or_dare') {
-        if (room.currentTurnPlayer) {
-          socket.emit('tod_player_turn', { playerId: room.currentTurnPlayer.id, playerName: room.currentTurnPlayer.name });
-        }
+        sendTodTurnState(roomCode);
       }
     } else {
-      // NOVÝ HRÁČ -> Přidáme ho do seznamu
       const newPlayer = { id: socket.id, name: trimmedName, role: 'Hráč' };
       room.players.push(newPlayer);
       socket.join(roomCode);
@@ -506,6 +501,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // LOGIKA IMPOSTOR
   socket.on('start_impostor', async ({ roomCode, impostorCount }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
@@ -533,7 +529,6 @@ io.on('connection', (socket) => {
         }
       });
 
-      // 10% šance, že začne Impostor
       const allowImpostorToStart = Math.random() < 0.1; 
       let startIndex = 0;
 
@@ -616,19 +611,28 @@ io.on('connection', (socket) => {
     logEvent('IMPOSTOR', `Konec hry v ${roomCode}. Odhaleni Impostoři: ${impostors.join(', ')}`);
   });
 
+  // LOGIKA PRAVDA NEBO ÚKOL (SEŘAZENÝ PRŮBĚH)
   socket.on('start_truth_or_dare', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
 
     room.currentGame = 'truth_or_dare';
+    
+    // Zamícháme pořadí hráčů pro tuto hru
+    room.todPlayerOrder = [...room.players].sort(() => Math.random() - 0.5);
+    room.currentTurnIndex = 0;
+
     io.to(room.hostId).emit('game_started', { game: 'Pravda nebo Úkol' });
     logEvent('TOD', `Spuštěna hra Pravda nebo Úkol v místnosti ${roomCode}`);
-    nextTruthOrDareTurn(roomCode);
+    
+    sendTodTurnState(roomCode);
   });
 
   socket.on('tod_choice', async ({ roomCode, choice }) => {
     const room = rooms[roomCode];
-    if (!room || !room.currentTurnPlayer) return;
+    if (!room || room.todPlayerOrder.length === 0) return;
+
+    const activePlayer = room.todPlayerOrder[room.currentTurnIndex];
 
     try {
       const dbRes = await pool.query(
@@ -639,18 +643,25 @@ io.on('connection', (socket) => {
       const choiceLabel = choice === 'truth' ? 'PRAVDA' : 'ÚKOL';
 
       io.to(roomCode).emit('tod_question', {
-        playerName: room.currentTurnPlayer.name,
+        playerName: activePlayer.name,
         type: choiceLabel,
         text: question
       });
 
-      logEvent('TOD', `Hráč "${room.currentTurnPlayer.name}" si vybral [${choiceLabel}]: "${question}"`);
+      logEvent('TOD', `Hráč "${activePlayer.name}" si vybral [${choiceLabel}]: "${question}"`);
     } catch (err) {
       console.error('Chyba DB:', err);
     }
   });
 
-  socket.on('next_tod_turn', ({ roomCode }) => nextTruthOrDareTurn(roomCode));
+  socket.on('next_tod_turn', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room || room.todPlayerOrder.length === 0) return;
+
+    // Posuneme se na dalšího hráče v seznamu
+    room.currentTurnIndex = (room.currentTurnIndex + 1) % room.todPlayerOrder.length;
+    sendTodTurnState(roomCode);
+  });
 
   socket.on('return_to_lobby', ({ roomCode }) => {
     const room = rooms[roomCode];
@@ -660,7 +671,6 @@ io.on('connection', (socket) => {
     logEvent('GAMES', `Návrat do lobby v místnosti ${roomCode}`);
   });
 
-  // Odpojení s časovou prodlevou (pro případ, že šlo jen o refresh stránky)
   socket.on('disconnect', () => {
     for (const code in rooms) {
       const room = rooms[code];
@@ -669,10 +679,15 @@ io.on('connection', (socket) => {
       if (playerIndex !== -1) {
         const disconnectedPlayer = room.players[playerIndex];
 
-        // Počkáme 4 sekundy, zda se hráč nevrátí (refresh)
         setTimeout(() => {
           if (disconnectedPlayer.id === socket.id) {
             room.players.splice(playerIndex, 1);
+            
+            // Vyčistíme i z TOD pořadí
+            if (room.todPlayerOrder) {
+              room.todPlayerOrder = room.todPlayerOrder.filter(p => p.name !== disconnectedPlayer.name);
+            }
+
             io.to(room.hostId).emit('update_players', room.players);
             logEvent('PLAYERS', `Hráč "${disconnectedPlayer.name}" se odpojil z ${code}`);
           }
@@ -698,12 +713,16 @@ function sendImpostorTurnState(roomCode) {
   });
 }
 
-function nextTruthOrDareTurn(roomCode) {
+function sendTodTurnState(roomCode) {
   const room = rooms[roomCode];
-  if (!room || room.players.length === 0) return;
-  const randomPlayer = room.players[Math.floor(Math.random() * room.players.length)];
-  room.currentTurnPlayer = randomPlayer;
-  io.to(roomCode).emit('tod_player_turn', { playerId: randomPlayer.id, playerName: randomPlayer.name });
+  if (!room || room.todPlayerOrder.length === 0) return;
+
+  const activePlayer = room.todPlayerOrder[room.currentTurnIndex];
+  
+  io.to(roomCode).emit('tod_player_turn', { 
+    playerId: activePlayer.id, 
+    playerName: activePlayer.name 
+  });
 }
 
 const PORT = process.env.PORT || 3000;
