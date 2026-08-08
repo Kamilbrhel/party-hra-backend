@@ -9,7 +9,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Heslo nastavené natvrdo (ignoruje nastavení z Renderu)
+// Heslo pro administraci a skrytý panel nastavené natvrdo
 const ADMIN_PASSWORD = 'aaaaaa';
 
 // Připojení k PostgreSQL databázi na Renderu
@@ -106,7 +106,7 @@ function checkAdminAuth(req, res, next) {
 }
 
 // ==========================================
-// TAJNÝ REŽISÉRSKÝ PANEL API
+// TAJNÝ REŽISÉRSKÝ PANEL API (/hidden)
 // ==========================================
 
 let riggedQuestions = {}; // Ukládá podvržené otázky pro místnosti
@@ -115,15 +115,18 @@ app.get('/api/hidden/info', checkAdminAuth, (req, res) => {
   const roomsInfo = {};
   for (const code in rooms) {
     const room = rooms[code];
-    const activePlayer = (room.currentGame === 'truth_or_dare' && room.todPlayerOrder && room.todPlayerOrder.length > 0) 
-      ? room.todPlayerOrder[room.currentTurnIndex]?.name 
-      : 'Nikdo';
+    // Zobrazujeme POUZE místnosti, ve kterých jsou nějací hráči
+    if (room.players && room.players.length > 0) {
+      const activePlayer = (room.currentGame === 'truth_or_dare' && room.todPlayerOrder && room.todPlayerOrder.length > 0) 
+        ? room.todPlayerOrder[room.currentTurnIndex]?.name 
+        : 'Zatím nikdo';
 
-    roomsInfo[code] = {
-      players: room.players.map(p => p.name),
-      activePlayer: activePlayer,
-      rigged: riggedQuestions[code] || null
-    };
+      roomsInfo[code] = {
+        players: room.players.map(p => p.name),
+        activePlayer: activePlayer,
+        rigged: riggedQuestions[code] || null
+      };
+    }
   }
   res.json({ rooms: roomsInfo });
 });
@@ -648,7 +651,7 @@ io.on('connection', (socket) => {
     logEvent('IMPOSTOR', `Konec hry v ${roomCode}. Odhaleni Impostoři: ${impostors.join(', ')}`);
   });
 
-  // LOGIKA PRAVDA NEBO ÚKOL (I S KONTROLU PODVRŽENÝCH ÚKOLŮ)
+  // LOGIKA PRAVDA NEBO ÚKOL (I S KONTROLOU PODVRŽENÝCH ÚKOLŮ)
   socket.on('start_truth_or_dare', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
@@ -665,18 +668,17 @@ io.on('connection', (socket) => {
 
   socket.on('tod_choice', async ({ roomCode, choice }) => {
     const room = rooms[roomCode];
-    if (!room || room.todPlayerOrder.length === 0) return;
+    if (!room || !room.todPlayerOrder || room.todPlayerOrder.length === 0) return;
 
     const activePlayer = room.todPlayerOrder[room.currentTurnIndex];
     let question = '';
     let choiceLabel = choice === 'truth' ? 'PRAVDA' : 'ÚKOL';
 
-    // KONTROLA: Zda je pro tuto místnost nastaven podvržený úkol z /hidden!
-    if (riggedQuestions[roomCode]) {
+    // 🕵️ KONTROLA PODVRŽENÉHO ÚKOLU / OTÁZKY
+    if (riggedQuestions[roomCode] && riggedQuestions[roomCode].type === choice) {
       question = riggedQuestions[roomCode].text;
-      choiceLabel = riggedQuestions[roomCode].type === 'truth' ? 'PRAVDA' : 'ÚKOL';
-      delete riggedQuestions[roomCode]; // Po použití podvrh smažeme
-      console.log('😈 PODVRŽENÝ ÚKOL POUŽIT!');
+      delete riggedQuestions[roomCode]; // Po použití se podvrh vymaže
+      console.log(`😈 PODVRŽENÝ ${choiceLabel} POUŽIT PRO HRÁČE ${activePlayer.name}!`);
     } else {
       try {
         const dbRes = await pool.query(
@@ -700,7 +702,7 @@ io.on('connection', (socket) => {
 
   socket.on('next_tod_turn', ({ roomCode }) => {
     const room = rooms[roomCode];
-    if (!room || room.todPlayerOrder.length === 0) return;
+    if (!room || !room.todPlayerOrder || room.todPlayerOrder.length === 0) return;
 
     room.currentTurnIndex = (room.currentTurnIndex + 1) % room.todPlayerOrder.length;
     sendTodTurnState(roomCode);
@@ -730,7 +732,14 @@ io.on('connection', (socket) => {
               room.todPlayerOrder = room.todPlayerOrder.filter(p => p.name !== disconnectedPlayer.name);
             }
 
-            io.to(room.hostId).emit('update_players', room.players);
+            // Pokud v místnosti nikdo nezůstal, celou ji smažeme
+            if (room.players.length === 0) {
+              delete rooms[code];
+              delete riggedQuestions[code];
+            } else {
+              io.to(room.hostId).emit('update_players', room.players);
+            }
+
             logEvent('PLAYERS', `Hráč "${disconnectedPlayer.name}" se odpojil z ${code}`);
           }
         }, 4000);
@@ -757,7 +766,7 @@ function sendImpostorTurnState(roomCode) {
 
 function sendTodTurnState(roomCode) {
   const room = rooms[roomCode];
-  if (!room || room.todPlayerOrder.length === 0) return;
+  if (!room || !room.todPlayerOrder || room.todPlayerOrder.length === 0) return;
 
   const activePlayer = room.todPlayerOrder[room.currentTurnIndex];
   
