@@ -16,12 +16,19 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Zápis událostí do DB
+// Zápis událostí do DB s českým časovým razítkem
 async function logEvent(category, text) {
   try {
+    const czechTime = new Date().toLocaleTimeString('cs-CZ', { 
+      timeZone: 'Europe/Prague',
+      hour: '2-digit', 
+      minute: '2-digit', 
+      second: '2-digit' 
+    });
+
     await pool.query(
-      'INSERT INTO game_logs (category, text, created_at) VALUES ($1, $2, NOW())',
-      [category, text]
+      'INSERT INTO game_logs (category, text, time_str, created_at) VALUES ($1, $2, $3, NOW())',
+      [category, text, czechTime]
     );
   } catch (err) {
     console.error('Chyba při zápisu do logu:', err);
@@ -53,8 +60,14 @@ async function initDb() {
         id SERIAL PRIMARY KEY,
         category VARCHAR(20) NOT NULL,
         text TEXT NOT NULL,
+        time_str VARCHAR(20) DEFAULT '',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+    `);
+
+    // Přidání sloupce time_str pokud v existující tabulce chybí
+    await pool.query(`
+      ALTER TABLE game_logs ADD COLUMN IF NOT EXISTS time_str VARCHAR(20) DEFAULT '';
     `);
 
     const wordsCount = await pool.query('SELECT COUNT(*) FROM impostor_words');
@@ -144,7 +157,7 @@ app.get('/api/admin/data', checkAdminAuth, async (req, res) => {
     const tod = await pool.query('SELECT * FROM truth_or_dare ORDER BY id DESC');
     const who = await pool.query('SELECT * FROM who_would ORDER BY id DESC');
     const never = await pool.query('SELECT * FROM never_have_i ORDER BY id DESC');
-    const logs = await pool.query("SELECT id, category, text, TO_CHAR(created_at, 'HH24:MI:SS') as time_str FROM game_logs ORDER BY id DESC LIMIT 150");
+    const logs = await pool.query('SELECT id, category, text, time_str FROM game_logs ORDER BY id DESC LIMIT 150');
     res.json({ words: words.rows, tod: tod.rows, who: who.rows, never: never.rows, logs: logs.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -225,9 +238,9 @@ app.get('/admin', (req, res) => {
         .badge { font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px; text-transform: uppercase; }
         .badge-truth { background: #3b82f6; color: white; }
         .badge-dare { background: #a855f7; color: white; }
-        .log-item { padding: 8px 12px; border-bottom: 1px solid #334155; font-size: 13px; display: flex; gap: 10px; }
-        .log-time { color: #64748b; font-family: monospace; }
-        .log-cat { font-weight: bold; color: #38bdf8; width: 90px; flex-shrink: 0; }
+        .log-item { padding: 8px 12px; border-bottom: 1px solid #334155; font-size: 13px; display: flex; gap: 10px; align-items: center; }
+        .log-time { color: #64748b; font-family: monospace; font-weight: bold; flex-shrink: 0; }
+        .log-cat { font-weight: bold; color: #38bdf8; width: 95px; flex-shrink: 0; }
       </style>
     </head>
     <body>
@@ -321,7 +334,7 @@ app.get('/admin', (req, res) => {
           if (success) {
             document.getElementById('authOverlay').style.display = 'none';
             document.getElementById('mainContent').style.display = 'block';
-            setInterval(loadData, 4000); // Auto-obnovení dat a logů
+            setInterval(loadData, 4000);
           } else {
             document.getElementById('loginError').style.display = 'block';
           }
@@ -387,7 +400,7 @@ app.get('/admin', (req, res) => {
           }
           box.innerHTML = allLogs.map(l => \`
             <div class="log-item">
-              <span class="log-time">\${l.time_str || ''}</span>
+              <span class="log-time">\${l.time_str || '--:--:--'}</span>
               <span class="log-cat">[\${l.category}]</span>
               <span>\${l.text}</span>
             </div>
@@ -434,7 +447,7 @@ app.get('/admin', (req, res) => {
         function downloadLogsTxt() {
           if (allLogs.length === 0) return alert('Žádné logy!');
           let txt = "=== PÁRTY HRA - LOGY ===\\n\\n";
-          allLogs.forEach(l => { txt += \`[\${l.time_str}] [\${l.category}] \${l.text}\\n\`; });
+          allLogs.forEach(l => { txt += \`[\${l.time_str || '--:--:--'}] [\${l.category}] \${l.text}\\n\`; });
           const blob = new Blob([txt], { type: 'text/plain;charset=utf-8;' });
           const a = document.createElement('a');
           a.href = URL.createObjectURL(blob);
