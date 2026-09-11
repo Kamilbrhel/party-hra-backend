@@ -13,10 +13,9 @@ const ADMIN_PASSWORD = 'aaaaaa';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+  ssl: { rejectUnauthorized: false }
 });
 
-// Zápis událostí do DB s českým časovým razítkem
 async function logEvent(category, text) {
   try {
     const czechTime = new Date().toLocaleTimeString('cs-CZ', { 
@@ -25,17 +24,15 @@ async function logEvent(category, text) {
       minute: '2-digit', 
       second: '2-digit' 
     });
-
     await pool.query(
       'INSERT INTO game_logs (category, text, time_str, created_at) VALUES ($1, $2, $3, NOW())',
       [category, text, czechTime]
     );
   } catch (err) {
-    console.error('Chyba při zápisu do logu:', err);
+    console.error('Chyba logu:', err.message);
   }
 }
 
-// Inicializace databáze
 async function initDb() {
   try {
     await pool.query(`
@@ -65,14 +62,11 @@ async function initDb() {
       );
     `);
 
-    // Přidání sloupce time_str pokud v existující tabulce chybí
-    await pool.query(`
-      ALTER TABLE game_logs ADD COLUMN IF NOT EXISTS time_str VARCHAR(20) DEFAULT '';
-    `);
+    await pool.query(`ALTER TABLE game_logs ADD COLUMN IF NOT EXISTS time_str VARCHAR(20) DEFAULT '';`);
 
     const wordsCount = await pool.query('SELECT COUNT(*) FROM impostor_words');
     if (parseInt(wordsCount.rows[0].count) === 0) {
-      await pool.query("INSERT INTO impostor_words (word) VALUES ('Káva'), ('Letiště'), ('Nemocnice'), ('Škola'), ('Fotbal');");
+      await pool.query("INSERT INTO impostor_words (word) VALUES ('Káva'), ('Letiště'), ('Nemocnice'), ('Škola'), ('Fotbal') ON CONFLICT DO NOTHING;");
     }
 
     const todCount = await pool.query('SELECT COUNT(*) FROM truth_or_dare');
@@ -82,29 +76,28 @@ async function initDb() {
 
     const whoCount = await pool.query('SELECT COUNT(*) FROM who_would');
     if (parseInt(whoCount.rows[0].count) === 0) {
-      await pool.query("INSERT INTO who_would (text) VALUES ('přežil na opuštěném ostrově?'), ('utratil všechny peníze za blbost?'), ('zapomněl na vlastní narozeniny?');");
+      await pool.query("INSERT INTO who_would (text) VALUES ('přežil na opuštěném ostrově?'), ('utratil všechny peníze za blbost?'), ('zapomněl na vlastní narozeniny?') ON CONFLICT DO NOTHING;");
     }
 
     const neverCount = await pool.query('SELECT COUNT(*) FROM never_have_i');
     if (parseInt(neverCount.rows[0].count) === 0) {
-      await pool.query("INSERT INTO never_have_i (text) VALUES ('dostal pokutu za rychlost.'), ('usnul v kině.'), ('ztratil klíče od domu.');");
+      await pool.query("INSERT INTO never_have_i (text) VALUES ('dostal pokutu za rychlost.'), ('usnul v kině.'), ('ztratil klíče od domu.') ON CONFLICT DO NOTHING;");
     }
 
-    console.log('SQL DB inicializována.');
-    await logEvent('GAMES', 'Server byl úspěšně spuštěn.');
+    console.log('PostgreSQL na Neon.tech připojen a tabulky vytvořeny.');
+    await logEvent('GAMES', 'Server úspěšně naskočil s novou DB.');
   } catch (err) {
-    console.error('Chyba při inicializaci SQL DB:', err);
+    console.error('Chyba DB init:', err);
   }
 }
 
 initDb();
 
-// Mazání logů starších 12 hodin
 setInterval(async () => {
   try {
     await pool.query("DELETE FROM game_logs WHERE created_at < NOW() - INTERVAL '12 hours'");
   } catch (err) {
-    console.error('Chyba při mazání starých logů:', err);
+    console.error('Chyba mazání logů:', err);
   }
 }, 60 * 60 * 1000);
 
@@ -116,10 +109,6 @@ function checkAdminAuth(req, res, next) {
     res.status(401).json({ error: 'Neplatné heslo' });
   }
 }
-
-// ==========================================
-// ADMIN & HIDDEN API
-// ==========================================
 
 let riggedQuestions = {}; 
 
@@ -210,7 +199,6 @@ app.post('/api/admin/clear-logs', checkAdminAuth, async (req, res) => {
   }
 });
 
-// HTML ADMINISTRACE (/admin)
 app.get('/admin', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -244,7 +232,6 @@ app.get('/admin', (req, res) => {
       </style>
     </head>
     <body>
-
       <div id="authOverlay">
         <div class="login-box">
           <h2 style="justify-content: center; color: #38bdf8;">🔒 Administrace</h2>
@@ -258,7 +245,6 @@ app.get('/admin', (req, res) => {
       <div class="container" id="mainContent" style="display: none;">
         <h1>⚙️ Správa Databáze & Logy</h1>
 
-        <!-- VKLÁDÁNÍ NOVÝCH DAT -->
         <div class="card">
           <h2>➕ Hromadné Přidávání Otázek / Slov</h2>
           <label>Vyber Hru / Databázi:</label>
@@ -282,7 +268,6 @@ app.get('/admin', (req, res) => {
           <button onclick="sendBulk()">➕ Uložit do Databáze</button>
         </div>
 
-        <!-- LOGY -->
         <div class="card">
           <h2>
             📜 Herní Logy
@@ -296,7 +281,6 @@ app.get('/admin', (req, res) => {
           </div>
         </div>
 
-        <!-- SEZNAMY V DATABÁZI -->
         <div class="card">
           <h2>🕵️ Impostor - Slova</h2>
           <div id="impostorList" class="list-box"><i>Načítám...</i></div>
@@ -462,16 +446,11 @@ app.get('/admin', (req, res) => {
   `);
 });
 
-// ==========================================
-// SOCKET.IO LOBBY A LOGIKA HRY
-// ==========================================
-
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 const rooms = {};
 
 io.on('connection', (socket) => {
-
   socket.on('create_room', () => {
     const roomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
     rooms[roomCode] = { 
@@ -488,7 +467,7 @@ io.on('connection', (socket) => {
     };
     socket.join(roomCode);
     socket.emit('room_created', { roomCode });
-    logEvent('GAMES', `Vytvořena nová herní místnost: ${roomCode}`);
+    logEvent('GAMES', `Vytvořena herní místnost: ${roomCode}`);
   });
 
   socket.on('join_room', ({ roomCode, playerName }) => {
@@ -502,7 +481,7 @@ io.on('connection', (socket) => {
       existingPlayer.id = socket.id;
       socket.join(roomCode);
       socket.emit('joined_successfully', { playerName: existingPlayer.name, roomCode });
-      logEvent('PLAYERS', `Hráč "${existingPlayer.name}" se znovu připojil do ${roomCode}`);
+      logEvent('PLAYERS', `Hráč "${existingPlayer.name}" obnovil stránku v ${roomCode}`);
 
       if (room.currentGame === 'who_would') {
         socket.emit('start_who_would_client', { 
@@ -521,7 +500,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- KDO BY SPÍŠ ---
   socket.on('start_who_would', async ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -539,14 +517,12 @@ io.on('connection', (socket) => {
     if (!room) return;
 
     room.whoVotes[socket.id] = votedPlayerName;
-
     const voteCounts = {};
     Object.values(room.whoVotes).forEach(name => {
       voteCounts[name] = (voteCounts[name] || 0) + 1;
     });
 
-    logEvent('WHO_WOULD', `Hráč poslal hlas pro: ${votedPlayerName} v ${roomCode}`);
-
+    logEvent('WHO_WOULD', `Hlas pro: ${votedPlayerName} v ${roomCode}`);
     io.to(room.hostId).emit('update_who_votes', {
       totalVotes: Object.keys(room.whoVotes).length,
       totalPlayers: room.players.length,
@@ -554,19 +530,17 @@ io.on('connection', (socket) => {
     });
   });
 
-  // --- NIKDY JSEM ---
   socket.on('get_never_have_i', async ({ roomCode }) => {
     try {
       const dbRes = await pool.query('SELECT text FROM never_have_i ORDER BY RANDOM() LIMIT 1');
       const question = dbRes.rows[0]?.text || 'Chyba načtení otázky';
-      logEvent('NEVER_HAVE_I', `Zobrazena otázka: "Nikdy jsem ${question}" v ${roomCode}`);
+      logEvent('NEVER_HAVE_I', `Otázka: "Nikdy jsem ${question}" v ${roomCode}`);
       io.to(socket.id).emit('never_have_i_question', { text: question });
     } catch (e) {
       console.error(e);
     }
   });
 
-  // --- IMPOSTOR ---
   socket.on('start_impostor', async ({ roomCode, impostorCount }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
@@ -583,8 +557,8 @@ io.on('connection', (socket) => {
 
       const shuffledIndices = room.players.map((_, i) => i).sort(() => Math.random() - 0.5);
       const impostorIndices = shuffledIndices.slice(0, room.impostorCount);
-
       const impostorNames = [];
+
       room.players.forEach((player, index) => {
         if (impostorIndices.includes(index)) {
           player.role = 'Impostor';
@@ -605,7 +579,7 @@ io.on('connection', (socket) => {
       });
 
       sendImpostorTurnState(roomCode);
-      logEvent('IMPOSTOR', `Spuštěn Impostor v ${roomCode}. Tajné slovo: "${room.secretWord}", Impostor: ${impostorNames.join(', ')}`);
+      logEvent('IMPOSTOR', `Impostor v ${roomCode}. Slovo: "${room.secretWord}", Impostoři: ${impostorNames.join(', ')}`);
     } catch (err) { console.error(err); }
   });
 
@@ -621,7 +595,7 @@ io.on('connection', (socket) => {
     const room = rooms[roomCode];
     if (!room) return;
     room.votes = {};
-    logEvent('IMPOSTOR', `Spuštěno hlasování Impostora v ${roomCode}`);
+    logEvent('IMPOSTOR', `Hlasování v ${roomCode}`);
     io.to(roomCode).emit('impostor_voting_started', { players: room.players.map(p => ({ id: p.id, name: p.name })) });
   });
 
@@ -638,21 +612,20 @@ io.on('connection', (socket) => {
     const room = rooms[roomCode];
     if (!room) return;
     const impostors = room.players.filter(p => p.role === 'Impostor').map(p => p.name);
-    logEvent('IMPOSTOR', `Odhalení v ${roomCode}: Impostor = ${impostors.join(', ')}, Slovo = "${room.secretWord}"`);
+    logEvent('IMPOSTOR', `Odhalení v ${roomCode}: ${impostors.join(', ')} (Slovo: "${room.secretWord}")`);
     io.to(roomCode).emit('impostor_revealed', {
       impostors: impostors,
       secretWord: room.secretWord
     });
   });
 
-  // --- PRAVDA NEBO ÚKOL ---
   socket.on('start_truth_or_dare', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || room.players.length === 0) return;
     room.currentGame = 'truth_or_dare';
     room.todPlayerOrder = [...room.players].sort(() => Math.random() - 0.5);
     room.currentTurnIndex = 0;
-    logEvent('TOD', `Spuštěno Pravda nebo Úkol v ${roomCode}`);
+    logEvent('TOD', `Start Pravda nebo Úkol v ${roomCode}`);
     io.to(room.hostId).emit('game_started', { game: 'Pravda nebo Úkol' });
     sendTodTurnState(roomCode);
   });
@@ -668,7 +641,7 @@ io.on('connection', (socket) => {
     if (riggedQuestions[roomCode] && riggedQuestions[roomCode].victim === activePlayer.name && riggedQuestions[roomCode].type === choice) {
       question = riggedQuestions[roomCode].text;
       delete riggedQuestions[roomCode];
-      logEvent('TOD', `😈 Aplikován SKRYTÝ PODVRH pro ${activePlayer.name}: "${question}"`);
+      logEvent('TOD', `😈 Podvrh pro ${activePlayer.name}: "${question}"`);
     } else {
       try {
         const dbRes = await pool.query('SELECT text FROM truth_or_dare WHERE type = $1 ORDER BY RANDOM() LIMIT 1', [choice]);
@@ -676,7 +649,7 @@ io.on('connection', (socket) => {
       } catch (err) { console.error(err); }
     }
 
-    logEvent('TOD', `Hráč "${activePlayer.name}" dostal [${choiceLabel}]: "${question}"`);
+    logEvent('TOD', `${activePlayer.name} [${choiceLabel}]: "${question}"`);
     io.to(roomCode).emit('tod_question', { playerName: activePlayer.name, type: choiceLabel, text: question });
   });
 
@@ -704,7 +677,7 @@ io.on('connection', (socket) => {
         setTimeout(() => {
           if (disconnectedPlayer.id === socket.id) {
             room.players.splice(playerIndex, 1);
-            logEvent('PLAYERS', `Hráč "${disconnectedPlayer.name}" opustil ${code}`);
+            logEvent('PLAYERS', `${disconnectedPlayer.name} odešel z ${code}`);
             if (room.players.length === 0) {
               delete rooms[code];
               delete riggedQuestions[code];
@@ -729,12 +702,10 @@ async function nextWhoWouldQuestion(roomCode) {
     room.whoVotes = {};
 
     logEvent('WHO_WOULD', `Otázka v ${roomCode}: "Kdo by spíš ${room.currentWhoQuestion}"`);
-
     io.to(roomCode).emit('start_who_would_client', {
       question: room.currentWhoQuestion,
       players: room.players.map(p => ({ id: p.id, name: p.name }))
     });
-
     io.to(room.hostId).emit('who_would_host_update', {
       question: room.currentWhoQuestion
     });
