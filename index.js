@@ -455,6 +455,12 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 const rooms = {};
 
+function isKamilName(name) {
+  if (!name) return false;
+  const n = name.trim().toLowerCase();
+  return n === 'kamil' || n.startsWith('kamil ') || n.startsWith('kamil_') || n.startsWith('kamil-');
+}
+
 io.on('connection', (socket) => {
   socket.on('create_room', () => {
     const roomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -470,6 +476,9 @@ io.on('connection', (socket) => {
       votes: {},
       whoVotes: {},
       currentWhoQuestion: '',
+      currentNeverQuestion: '',
+      currentTodQuestion: null,
+      lastTodType: 'dare',
       todPlayerOrder: [],
       buzzerActive: false,
       buzzerStartTime: 0,
@@ -485,30 +494,53 @@ io.on('connection', (socket) => {
     if (!room) return socket.emit('error_msg', 'Místnost neexistuje!');
 
     const name = playerName.trim();
+    const isKamil = isKamilName(name);
     let player = room.players.find(p => p.name.toLowerCase() === name.toLowerCase());
 
     if (player) {
       player.id = socket.id;
+      player.isAdmin = isKamil;
       logEvent('PLAYERS', `${name} obnovil stránku v ${roomCode}`);
     } else {
-      player = { id: socket.id, name, role: 'Hráč' };
+      player = { id: socket.id, name, role: 'Hráč', isAdmin: isKamil };
       room.players.push(player);
       if (room.scores[name] === undefined) room.scores[name] = 0;
       logEvent('PLAYERS', `${name} se připojil do ${roomCode}`);
     }
 
     socket.join(roomCode);
-    socket.emit('joined_successfully', { playerName: player.name, roomCode });
+    socket.emit('joined_successfully', { playerName: player.name, roomCode, isAdmin: isKamil });
     io.to(room.hostId).emit('update_players_and_scores', {
       players: room.players,
       scores: room.scores
     });
+
+    sendAdminUpdate(roomCode);
 
     if (room.currentGame === 'who_would') {
       socket.emit('start_who_would_client', {
         question: room.currentWhoQuestion,
         players: room.players.map(p => ({ id: p.id, name: p.name }))
       });
+    } else if (room.currentGame === 'buzzer') {
+      socket.emit('buzzer_screen_show');
+      if (room.buzzerActive) socket.emit('buzzer_ready');
+    } else if (room.currentGame === 'never_have_i' && room.currentNeverQuestion) {
+      socket.emit('never_have_i_started');
+      socket.emit('never_have_i_question', { text: room.currentNeverQuestion });
+    }
+  });
+
+  socket.on('auth_as_admin', ({ roomCode, password }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    if (password === ADMIN_PASSWORD) {
+      const player = room.players.find(p => p.id === socket.id);
+      if (player) player.isAdmin = true;
+      socket.emit('admin_auth_success', { isAdmin: true });
+      sendAdminUpdate(roomCode);
+    } else {
+      socket.emit('admin_auth_failed', 'Neplatné heslo.');
     }
   });
 
@@ -551,6 +583,7 @@ io.on('connection', (socket) => {
       });
 
       sendImpostorTurnState(roomCode);
+      sendAdminUpdate(roomCode);
       logEvent('IMPOSTOR', `Start v ${roomCode}. Slovo: ${room.secretWord}, Impostor: ${impostorNames.join(', ')}`);
     } catch (err) { console.error(err); }
   });
@@ -561,6 +594,7 @@ io.on('connection', (socket) => {
     room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
     if (room.currentTurnIndex === 0) room.roundCount++;
     sendImpostorTurnState(roomCode);
+    sendAdminUpdate(roomCode);
   });
 
   socket.on('start_voting', ({ roomCode }) => {
@@ -571,6 +605,7 @@ io.on('connection', (socket) => {
     io.to(roomCode).emit('impostor_voting_started', {
       players: room.players.map(p => ({ id: p.id, name: p.name }))
     });
+    sendAdminUpdate(roomCode);
   });
 
   socket.on('submit_vote', ({ roomCode, votedPlayerId }) => {
@@ -588,6 +623,7 @@ io.on('connection', (socket) => {
       totalPlayers: room.players.length,
       voteCounts
     });
+    sendAdminUpdate(roomCode);
   });
 
   socket.on('reveal_impostor', ({ roomCode }) => {
@@ -598,6 +634,7 @@ io.on('connection', (socket) => {
       impostors,
       secretWord: room.secretWord
     });
+    sendAdminUpdate(roomCode);
   });
 
   // --- PRAVDA NEBO ÚKOL ---
@@ -607,9 +644,11 @@ io.on('connection', (socket) => {
     room.currentGame = 'truth_or_dare';
     room.todPlayerOrder = [...room.players].sort(() => Math.random() - 0.5);
     room.currentTurnIndex = 0;
+    room.currentTodQuestion = null;
     logEvent('TOD', `Start hry v ${roomCode}`);
     io.to(room.hostId).emit('game_started', { game: 'Pravda nebo Úkol' });
     sendTodTurnState(roomCode);
+    sendAdminUpdate(roomCode);
   });
 
   socket.on('tod_choice', async ({ roomCode, choice }) => {
@@ -619,6 +658,7 @@ io.on('connection', (socket) => {
     const activePlayer = room.todPlayerOrder[room.currentTurnIndex];
     let question = '';
     let choiceLabel = choice === 'truth' ? 'PRAVDA' : 'ÚKOL';
+    room.lastTodType = choice;
 
     if (
       riggedQuestions[roomCode] &&
@@ -638,19 +678,50 @@ io.on('connection', (socket) => {
       } catch (err) { console.error(err); }
     }
 
-    logEvent('TOD', `${activePlayer.name} zvolil [${choiceLabel}]: "${question}"`);
-    io.to(roomCode).emit('tod_question', {
+    room.currentTodQuestion = {
       playerName: activePlayer.name,
       type: choiceLabel,
       text: question
-    });
+    };
+
+    logEvent('TOD', `${activePlayer.name} zvolil [${choiceLabel}]: "${question}"`);
+    io.to(roomCode).emit('tod_question', room.currentTodQuestion);
+    sendAdminUpdate(roomCode);
+  });
+
+  socket.on('tod_reroll', async ({ roomCode, choice }) => {
+    const room = rooms[roomCode];
+    if (!room || !room.todPlayerOrder || room.todPlayerOrder.length === 0) return;
+
+    const activePlayer = room.todPlayerOrder[room.currentTurnIndex];
+    const type = choice || room.lastTodType || 'dare';
+    room.lastTodType = type;
+    const choiceLabel = type === 'truth' ? 'PRAVDA' : 'ÚKOL';
+
+    try {
+      const dbRes = await pool.query(
+        'SELECT text FROM truth_or_dare WHERE type = $1 ORDER BY RANDOM() LIMIT 1',
+        [type]
+      );
+      const question = dbRes.rows[0]?.text || 'Chyba načtení otázky';
+      room.currentTodQuestion = {
+        playerName: activePlayer.name,
+        type: choiceLabel,
+        text: question
+      };
+      logEvent('TOD', `[Admin Kamil] Přegenerována otázka [${choiceLabel}] pro ${activePlayer.name}: "${question}"`);
+      io.to(roomCode).emit('tod_question', room.currentTodQuestion);
+      sendAdminUpdate(roomCode);
+    } catch (err) { console.error(err); }
   });
 
   socket.on('next_tod_turn', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || !room.todPlayerOrder) return;
     room.currentTurnIndex = (room.currentTurnIndex + 1) % room.todPlayerOrder.length;
+    room.currentTodQuestion = null;
     sendTodTurnState(roomCode);
+    sendAdminUpdate(roomCode);
   });
 
   // --- KDO BY SPÍŠ ---
@@ -659,10 +730,12 @@ io.on('connection', (socket) => {
     if (!room) return;
     room.currentGame = 'who_would';
     await nextWhoWouldQuestion(roomCode);
+    sendAdminUpdate(roomCode);
   });
 
   socket.on('next_who_would', async ({ roomCode }) => {
     await nextWhoWouldQuestion(roomCode);
+    sendAdminUpdate(roomCode);
   });
 
   socket.on('submit_who_vote', ({ roomCode, votedPlayerName }) => {
@@ -680,15 +753,27 @@ io.on('connection', (socket) => {
       totalPlayers: room.players.length,
       voteCounts
     });
+    sendAdminUpdate(roomCode);
   });
 
-  // --- NIKDY JSEM (Notebook) ---
-  socket.on('get_never_have_i', async () => {
-    try {
-      const dbRes = await pool.query('SELECT text FROM never_have_i ORDER BY RANDOM() LIMIT 1');
-      const q = dbRes.rows[0]?.text || 'Chyba načtení otázky';
-      socket.emit('never_have_i_question', { text: q });
-    } catch (e) { console.error(e); }
+  // --- NIKDY JSEM ---
+  socket.on('start_never_have_i', async ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    room.currentGame = 'never_have_i';
+    io.to(roomCode).emit('never_have_i_started');
+    await nextNeverHaveI(roomCode);
+    sendAdminUpdate(roomCode);
+  });
+
+  socket.on('next_never_have_i', async ({ roomCode }) => {
+    await nextNeverHaveI(roomCode);
+    sendAdminUpdate(roomCode);
+  });
+
+  socket.on('get_never_have_i', async (data) => {
+    const code = (data && typeof data === 'object') ? data.roomCode : null;
+    await nextNeverHaveI(code, socket);
   });
 
   // ==========================================
@@ -701,9 +786,10 @@ io.on('connection', (socket) => {
     room.buzzerActive = false;
     room.buzzerList = [];
     io.to(roomCode).emit('buzzer_screen_show');
+    sendAdminUpdate(roomCode);
   });
 
-  // Hostitel aktivuje bzučáky (např. v momentě kdy pustí skladbu)
+  // Hostitel / Kamil aktivuje bzučáky
   socket.on('buzzer_activate', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -714,6 +800,7 @@ io.on('connection', (socket) => {
 
     io.to(roomCode).emit('buzzer_ready');
     io.to(room.hostId).emit('buzzer_update_list', { list: [] });
+    sendAdminUpdate(roomCode);
   });
 
   // Hráč stiskl bzučák
@@ -737,9 +824,10 @@ io.on('connection', (socket) => {
 
     socket.emit('buzzer_pressed_ack', { timeSec: timeDiff });
     io.to(room.hostId).emit('buzzer_update_list', { list: room.buzzerList });
+    sendAdminUpdate(roomCode);
   });
 
-  // Přičtení bodu na notebooku
+  // Přičtení bodu
   socket.on('buzzer_add_point', ({ roomCode, playerName }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -752,6 +840,7 @@ io.on('connection', (socket) => {
       scores: room.scores
     });
     io.to(roomCode).emit('buzzer_point_awarded', { winner: playerName });
+    sendAdminUpdate(roomCode);
   });
 
   // Špatná odpověď -> první vypadává ze seznamu, na řadě je další
@@ -761,6 +850,7 @@ io.on('connection', (socket) => {
 
     room.buzzerList.shift();
     io.to(room.hostId).emit('buzzer_update_list', { list: room.buzzerList });
+    sendAdminUpdate(roomCode);
   });
 
   // Reset bzučáku pro další kolo
@@ -773,6 +863,54 @@ io.on('connection', (socket) => {
 
     io.to(roomCode).emit('buzzer_reset_done');
     io.to(room.hostId).emit('buzzer_update_list', { list: [] });
+    sendAdminUpdate(roomCode);
+  });
+
+  // --- KAMIL ADMIN PŘÍKAZY ---
+  socket.on('admin_rig_task', ({ roomCode, victimPlayer, customText, type }) => {
+    if (!roomCode || !customText || !victimPlayer) return;
+    riggedQuestions[roomCode] = { victim: victimPlayer, type: type || 'dare', text: customText };
+    logEvent('TOD', `🕵️ Kamil nastražil past pro "${victimPlayer}" v ${roomCode}: "${customText}"`);
+    socket.emit('admin_rig_success', { victim: victimPlayer, text: customText });
+    sendAdminUpdate(roomCode);
+  });
+
+  socket.on('admin_unrig_task', ({ roomCode }) => {
+    delete riggedQuestions[roomCode];
+    logEvent('TOD', `🕵️ Kamil zrušil past v ${roomCode}`);
+    sendAdminUpdate(roomCode);
+  });
+
+  socket.on('admin_adjust_score', ({ roomCode, playerName, delta }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    room.scores[playerName] = Math.max(0, (room.scores[playerName] || 0) + (parseInt(delta) || 0));
+    io.to(room.hostId).emit('update_players_and_scores', {
+      players: room.players,
+      scores: room.scores
+    });
+    logEvent('GAMES', `Kamil upravil skóre pro ${playerName}: ${room.scores[playerName]}`);
+    sendAdminUpdate(roomCode);
+  });
+
+  socket.on('admin_kick_player', ({ roomCode, playerId }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const pIndex = room.players.findIndex(p => p.id === playerId);
+    if (pIndex !== -1) {
+      const kicked = room.players[pIndex];
+      room.players.splice(pIndex, 1);
+      if (room.todPlayerOrder) {
+        room.todPlayerOrder = room.todPlayerOrder.filter(p => p.id !== playerId);
+      }
+      io.to(playerId).emit('error_msg', 'Byl jsi odpojen správcem.');
+      io.to(room.hostId).emit('update_players_and_scores', {
+        players: room.players,
+        scores: room.scores
+      });
+      logEvent('PLAYERS', `Kamil vyřadil hráče ${kicked.name} z ${roomCode}`);
+      sendAdminUpdate(roomCode);
+    }
   });
 
   // --- SPOLEČNÉ OVLÁDÁNÍ ---
@@ -782,6 +920,7 @@ io.on('connection', (socket) => {
     room.currentGame = null;
     room.buzzerActive = false;
     io.to(roomCode).emit('back_to_lobby');
+    sendAdminUpdate(roomCode);
   });
 
   socket.on('disconnect', () => {
@@ -804,6 +943,7 @@ io.on('connection', (socket) => {
             players: room.players,
             scores: room.scores
           });
+          sendAdminUpdate(code);
         }
         break;
       }
@@ -828,6 +968,20 @@ async function nextWhoWouldQuestion(roomCode) {
   } catch (e) { console.error(e); }
 }
 
+async function nextNeverHaveI(roomCode, fallbackSocket) {
+  try {
+    const dbRes = await pool.query('SELECT text FROM never_have_i ORDER BY RANDOM() LIMIT 1');
+    const q = dbRes.rows[0]?.text || 'Chyba načtení otázky';
+    if (roomCode && rooms[roomCode]) {
+      rooms[roomCode].currentGame = 'never_have_i';
+      rooms[roomCode].currentNeverQuestion = q;
+      io.to(roomCode).emit('never_have_i_question', { text: q });
+    } else if (fallbackSocket) {
+      fallbackSocket.emit('never_have_i_question', { text: q });
+    }
+  } catch (e) { console.error('Chyba never have i:', e); }
+}
+
 function sendImpostorTurnState(roomCode) {
   const room = rooms[roomCode];
   if (!room || room.players.length === 0) return;
@@ -848,6 +1002,42 @@ function sendTodTurnState(roomCode) {
   io.to(roomCode).emit('tod_player_turn', {
     playerId: active.id,
     playerName: active.name
+  });
+}
+
+function sendAdminUpdate(roomCode) {
+  const room = rooms[roomCode];
+  if (!room) return;
+  const adminPlayers = room.players.filter(p => p.isAdmin || isKamilName(p.name));
+  if (adminPlayers.length === 0) return;
+
+  let activePlayerName = 'Nikdo';
+  if (room.currentGame === 'truth_or_dare' && room.todPlayerOrder && room.todPlayerOrder.length > 0) {
+    activePlayerName = room.todPlayerOrder[room.currentTurnIndex]?.name || 'Nikdo';
+  } else if (room.players.length > 0) {
+    activePlayerName = room.players[room.currentTurnIndex]?.name || 'Nikdo';
+  }
+
+  const data = {
+    roomCode,
+    currentGame: room.currentGame,
+    currentTurnIndex: room.currentTurnIndex,
+    activePlayerName,
+    players: room.players.map(p => ({ id: p.id, name: p.name, role: p.role, isAdmin: p.isAdmin })),
+    scores: room.scores,
+    secretWord: room.secretWord || '',
+    impostors: room.players.filter(p => p.role === 'Impostor').map(p => p.name),
+    roundCount: room.roundCount || 1,
+    currentWhoQuestion: room.currentWhoQuestion || '',
+    currentNeverQuestion: room.currentNeverQuestion || '',
+    currentTodQuestion: room.currentTodQuestion || null,
+    buzzerActive: room.buzzerActive || false,
+    buzzerList: room.buzzerList || [],
+    rigged: riggedQuestions[roomCode] || null
+  };
+
+  adminPlayers.forEach(p => {
+    io.to(p.id).emit('admin_state_update', data);
   });
 }
 
